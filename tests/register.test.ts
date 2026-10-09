@@ -542,6 +542,17 @@ describe('keepwarm', () => {
     expect(w.forks.length).toBe(0)
   })
 
+  test('two arm() calls racing leave one countdown timer', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start({ ...session, surface: 'vscode' })
+    await $.command.run(run('keepwarm', '6h'))
+    await Promise.all([$.turn.complete(turn()), $.turn.complete(turn()), $.command.run(run('keepwarm', '6h'))])
+    const before = w.status.length
+    await clock.advance(3 * MIN)
+    expect(w.status.length - before).toBe(3)
+  })
+
   test('the band countdown redraws as time passes', async ($, on) => {
     const clock = mock.clock(on, { now: 10 * HOUR })
     world(on, [])
