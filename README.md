@@ -72,7 +72,7 @@ The refusal, verbatim:
 
     Not sent: cache cold 2h00m. Resending re-writes up to 200,502 tokens ≈ $4.01 (warm turn: $0.05). Send again to pay (keepwarm then holds the cache 3h00m), or /clear.
 
-The dropped message is put back in the prompt box, so sending it again is one Enter; a draft you typed in the meantime is never overwritten. For a model with no price row the figure reads `price unknown` instead of a dollar amount. Money is always two decimals, with `<$0.01` below a cent; durations read `49m`, `1h05m`, `2d03h`.
+The dropped message is put back in the prompt box, so sending it again is one Enter; a draft you typed in the meantime is never overwritten. For a model with no price row the figure reads `price unknown` instead of a dollar amount. Money is always two decimals with thousands separators, and `<$0.01` below a cent; durations read `49m`, `1h05m`, `2d03h`.
 
 The figure is an upper bound. The context count the engine reports for a resumed session is the last response's input, cache read, cache write and output together, and the resume payload carries no separate output count to take off; on one 15-day-old session the refusal said 330,316 tokens and $6.61 and the write that followed was 314k tokens, $6.28.
 
@@ -80,7 +80,7 @@ While keepwarm is armed, the terminal and Desktop Code tab show a row above the 
 
 The row includes the warming window, next ping and last readback. A stopped loop shows a neutral symbol and its reason. `/keepwarm off` or an expired window removes the row. Surveys temporarily take priority, and other mods' content stays in the band. Sessions without this band retain the plain status text.
 
-The cube follows Claude's light or dark theme; the `auto` setting has no resolved value in the mod API, so it gets the dark cube, whose terminal image is edged for both backgrounds. Its terminal image also has a contrasting edge for terminal backgrounds that differ from that setting. The embedded assets come from the website's official SVGs; maintainers can regenerate them with `python3 tools/generate-status-icons.py` and `rsvg-convert` installed. No image files are read or fetched at runtime.
+The cube follows Claude's light or dark theme; the `auto` setting has no resolved value in the mod API, so it gets the dark cube, whose terminal image is edged for both backgrounds. The dark cube's lids are a shade deeper than the website's, so each keeps 3:1 against both the light edge and a dark host background. Its terminal image also has a contrasting edge for terminal backgrounds that differ from that setting. The embedded assets come from the website's official SVGs; maintainers can regenerate them with `python3 tools/generate-status-icons.py` and `rsvg-convert` installed. No image files are read or fetched at runtime.
 
 The mod reads the theme and `NO_COLOR` once when the session starts. Accepted theme changes update the icon immediately; ordinary redraws do not reread either setting. Set `NO_COLOR` before starting the session.
 
