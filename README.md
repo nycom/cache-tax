@@ -42,6 +42,8 @@ A detected cold write automatically arms at least three hours of keepwarm. `/cac
 
 Windows belong to individual sessions. An already-cold session waits for your next turn before pinging. A window ends at its deadline; `/keepwarm off` also cancels it and clears the always setting.
 
+**Theming:** on Omarchy, the band's dark variant takes its colours from `~/.local/state/omarchy/current/theme/colors.toml`: `accent` for warm, `red` for cold, `dark_foreground` for unknown and stopped, `foreground` for the row text. The light variant and `NO_COLOR` keep their own colours, and a file with `mode = "light"` applies none. The file is checked every 2 seconds while it exists, read only when its modification time changes, and every 60 seconds while it is missing, so a theme set mid-session is picked up.
+
 ### A recorded warming ping
 
 ![Real keepwarm status showing a 75k-token cache read at $0.02](site/assets/keepwarm-receipt.png)
@@ -93,13 +95,13 @@ The hook and the mod share a name and a job, so having both means two guards on 
 Validated on Claude Code 2.1.289:
 
     ❯ ./register.ts hooks: config.set{key=theme}, ui.render{component=AbovePrompt}, session.start, classic.SessionStart, command.run{command=keepwarm}, command.run{command=cache-tax}, prompt.submit, turn.step, turn.complete, session.compact
-    ❯ ./register.ts calls: $.clock.after (via arm), $.clock.every (via arm), $.clock.now, $.command.list, $.command.register, $.config.list, $.env.get, $.model.fork (via ping), $.prompt.fill, $.prompt.read, $.session.id, $.session.model, $.session.usage, $.store.delete (via prune, startWindow, stop), $.store.get, $.store.set, $.ui.invalidate, $.ui.log, $.ui.resolve, $.ui.status
-    ❯ ./register.ts env reads: NO_COLOR
+    ❯ ./register.ts calls: $.clock.after (via arm), $.clock.every (via arm, pollTheme), $.clock.now, $.command.list, $.command.register, $.config.list, $.env.get, $.fs.read (via loadTheme), $.fs.stat (via loadTheme), $.model.fork (via ping), $.prompt.fill, $.prompt.read, $.session.id, $.session.model, $.session.usage, $.state.get, $.state.set (via loadTheme), $.store.delete (via prune, startWindow, stop), $.store.get, $.store.set, $.ui.invalidate, $.ui.log, $.ui.resolve, $.ui.status
+    ❯ ./register.ts env reads: HOME, NO_COLOR
 
 Reach L2, drives Claude. Sees every prompt you type, every model request's timing and every answer's token counts.
 
     Threat model for cache-tax (reach L2, drives Claude)
-    1. Reads:    of each prompt, whether it starts with a slash and nothing else (the text is passed on untouched, never kept, never logged; a refused message is put back in the prompt box, and only while the box is empty); the time; the token counts and model id the engine already holds on turn.complete and on the fork's reply; the resume fields Claude Code computes for settings hooks; the command list, the session id and, when a resumed session's fields carry no model id, the session's model once at start; from its own $.store, the keepwarm deadline and the ping period keyed by session id, plus the global always switch and guard mode
+    1. Reads:    of each prompt, whether it starts with a slash and nothing else (the text is passed on untouched, never kept, never logged; a refused message is put back in the prompt box, and only while the box is empty); the time; the token counts and model id the engine already holds on turn.complete and on the fork's reply; the resume fields Claude Code computes for settings hooks; the command list, the session id and, when a resumed session's fields carry no model id, the session's model once at start; from its own $.store, the keepwarm deadline and the ping period keyed by session id, plus the global always switch and guard mode; on the terminal and desktop, `~/.local/state/omarchy/current/theme/colors.toml` for four colours and its mode, its modification time first
     2. Runs:     one $.model.fork per idle stretch inside a keepwarm window, one per ping period (50 minutes unless the testing knob set it, floor 1 minute), never outside the window, never onto a cache the mod already knows is cold, never after a readback that read nothing or wrote at least a tenth of what it read
     3. Sends:    nothing leaves the machine except the fork, an API request over the session's own transcript with a fixed one-line prompt
     4. Persists: in $.store, the keepwarm deadline and the ping period under this session's id, and the always switch and the guard mode for every session; a window that has ended is deleted at stop and at this session's next start, together with the bare keys of a 2.1.0 store; another session's keys are never deleted here, because a read followed by a delete cannot be made atomic against that session renewing its window, so a session that armed keepwarm and never came back leaves two small keys behind; the session's cold-write tally lives in memory and dies with the session
@@ -146,13 +148,13 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [64 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [68 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Guard:** refuse once and resend, the refusal wording and prompt restore, warn mode, slash commands, small contexts, resume seeding and cold-write scoring.
 - **Warming:** command defaults, always/off, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.
 - **Session state:** isolated store keys, restored windows, legacy cleanup, clear/compaction resets and subagent isolation.
 - **Pricing and display:** model matching, output and uncached input costs, context counts, duration and money formatting, and the read-only break-even figure.
-- **Indicator:** the one-minute countdown refresh and its timer lifecycle, truncation order, terminal images and desktop SVGs, theme selection, warm/cold transitions, resume, compaction, clear, expiry, surveys, other mods' content, text alternatives and `NO_COLOR` fallback.
+- **Indicator:** the one-minute countdown refresh and its timer lifecycle, truncation order, terminal images and desktop SVGs, theme selection, warm/cold transitions, resume, compaction, clear, expiry, surveys, other mods' content, text alternatives, `NO_COLOR` fallback and the Omarchy palette with its poll cadence.
 - **Preferences:** one read per session, immediate theme updates, denied changes and the effective theme returned by the settings writer.
 - **Fork failures:** structured failure results from current engines and the null result returned by older releases stop without retrying.
 

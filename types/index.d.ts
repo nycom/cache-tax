@@ -1,4 +1,4 @@
-export type Theme = { fg?: string; accent?: string; muted?: string; urgent?: string }
+export type Theme = { fg?: string; accent?: string; dim?: string; urgent?: string }
 
 declare module 'claude-code' {
   interface PluginState {

@@ -10,6 +10,9 @@ const MIN = 60 * 1000
 const HOUR = 60 * MIN
 const START = 1_000_000
 const THEME_POLL = 2000
+const THEME_IDLE_POLL = 60_000
+// Keys and values as basecamp/omarchy ships themes/tokyo-night/colors.toml.
+const TOKYO_NIGHT = 'mode = "dark"\naccent = "#7aa2f7"\nmuted = "#414868"\nbackground = "#1a1b26"\nforeground = "#a9b1d6"\ndark_foreground = "#565f89"\nred = "#f7768e"\n'
 
 const session: SessionStartInput = { surface: null, isInteractive: false, cwd: '/work' }
 
@@ -141,7 +144,7 @@ describe('cache indicator', () => {
 
   test('an Omarchy colors.toml themes the dark band and a missing file keeps the defaults', { timeoutMs: 20_000 }, async ($, on) => {
     const clock = mock.clock(on, { now: START })
-    const colors: { toml?: string } = { toml: 'foreground = "#c0caf5"\naccent = "#7aa2f7"\nmuted = "#565f89"\nred = "#f7768e"\n' }
+    const colors: { toml?: string } = { toml: TOKYO_NIGHT }
     world(on, [], { colors })
     await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
     await $.command.run(run('keepwarm', '3h every 90m'))
@@ -150,7 +153,7 @@ describe('cache indicator', () => {
     expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('#565f89')
     await $.turn.complete(turn())
     expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('#7aa2f7')
-    expect((await ui.find({ type: 'Text', text: /cache-tax$/ }))?.props.color).toBe('#c0caf5')
+    expect((await ui.find({ type: 'Text', text: /cache-tax$/ }))?.props.color).toBe('#a9b1d6')
     await clock.advance(HOUR)
     expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('#f7768e')
     colors.toml = undefined
@@ -159,18 +162,46 @@ describe('cache indicator', () => {
     expect((await ui.find({ type: 'Text', text: /cache-tax$/ }))?.props.color).toBe(undefined)
   })
 
-  test('an Omarchy colors.toml written after session start is picked up by the poll', { timeoutMs: 20_000 }, async ($, on) => {
+  test('a missing colors.toml is polled every minute and a found one every two seconds', { timeoutMs: 20_000 }, async ($, on) => {
     const clock = mock.clock(on, { now: START })
-    const colors: { toml?: string } = {}
+    const colors: { toml?: string; mtimeMs?: number } = {}
     world(on, [], { colors })
     await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
     await $.command.run(run('keepwarm', '3h every 90m'))
     const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
-    const label = /^(warm|cold|unknown|stopped)$/
-    expect((await ui.find({ type: 'Text', text: label }))?.props.color).not.toBe('#565f89')
-    colors.toml = 'foreground = "#c0caf5"\naccent = "#7aa2f7"\nmuted = "#565f89"\nred = "#f7768e"\n'
+    const text = /cache-tax$/
+    colors.toml = TOKYO_NIGHT
     await clock.advance(THEME_POLL)
-    expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('#565f89')
+    expect((await ui.find({ type: 'Text', text }))?.props.color).toBe(undefined)
+    await clock.advance(THEME_IDLE_POLL - THEME_POLL)
+    expect((await ui.find({ type: 'Text', text }))?.props.color).toBe('#a9b1d6')
+    colors.toml = TOKYO_NIGHT.replace('#a9b1d6', '#c0caf5')
+    colors.mtimeMs = 2
+    await clock.advance(THEME_POLL)
+    expect((await ui.find({ type: 'Text', text }))?.props.color).toBe('#c0caf5')
+  })
+
+  test('the theme is written only when its colours change and HOME is read once', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let writes = 0
+    on('state.set', ($, e, next) => { writes++; return next(e) })
+    const w = world(on, [], { colors: { toml: TOKYO_NIGHT } })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    expect(writes).toBe(1)
+    const envReads = w.reads.env
+    for (let i = 0; i < 5; i++) await clock.advance(THEME_POLL)
+    expect(writes).toBe(1)
+    expect(w.reads.env).toBe(envReads)
+  })
+
+  test('a light Omarchy theme applies no palette', { timeoutMs: 20_000 }, async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [], { colors: { toml: TOKYO_NIGHT.replace('mode = "dark"', 'mode = "light"') } })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.command.run(run('keepwarm', '3h every 90m'))
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    expect((await ui.find({ type: 'Text', text: /^unknown$/ }))?.props.color).toBe(undefined)
+    expect((await ui.find({ type: 'Text', text: /cache-tax$/ }))?.props.color).toBe(undefined)
   })
 
   for (const surface of ['terminal', 'desktop'] as const) {

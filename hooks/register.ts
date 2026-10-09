@@ -1,4 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
+import type { Theme } from '../types'
 import { statusIcons } from './status-icons'
 
 const TTL_MS = 60 * 60 * 1000
@@ -15,6 +16,7 @@ const KEY_GUARD = 'guard'
 const KEY_ALWAYS = 'always'
 const THEME_FILE = '.local/state/omarchy/current/theme/colors.toml'
 const THEME_POLL_MS = 2000
+const THEME_IDLE_POLL_MS = 60_000
 const THEME = { plugin: 'cache-tax', key: 'theme' } as const
 
 // $ per million tokens, [cache read, 1h cache write, output], list prices September 2026.
@@ -32,7 +34,6 @@ const PRICES: Array<[string, number, number, number]> = [
 type PingRecord = { at: number; read: number; write: number; usd: number | null; warm: boolean }
 type Miss = { at: number; tokens: number; usd: number | null }
 type GuardMode = 'refuse' | 'warn'
-type Theme = { fg?: string; accent?: string; muted?: string; urgent?: string }
 
 export type State = {
   hasBand: boolean
@@ -57,20 +58,21 @@ export type State = {
   themePoll: { cancel: () => void } | null
 }
 
-function parseTheme(toml: string): Theme {
+// Only the band's dark variant takes the palette, so a light Omarchy theme applies none.
+function parseTheme(toml: string): Theme | null {
+  if (/^mode\s*=\s*"light"/m.test(toml)) return null
   const get = (k: string) => toml.match(new RegExp(`^${k}\\s*=\\s*"(#[0-9a-fA-F]{6})"`, 'm'))?.[1]
-  return { fg: get('foreground') ?? get('color7'), accent: get('accent') ?? get('color4'), muted: get('muted') ?? get('color8'), urgent: get('red') ?? get('color1') }
+  return { fg: get('foreground'), accent: get('accent'), dim: get('dark_foreground'), urgent: get('red') }
 }
 
 // The Omarchy palette lives in an atom so the band redraws; it is written only when the file's colours changed, since a write redraws every reader. The poll stats first, so an unchanged file is not re-read.
-async function loadTheme($: EngineInterface, s: State) {
+async function loadTheme($: EngineInterface, s: State, path: string) {
   let theme: Theme | null = null
   try {
-    const path = `${(await $.env.get('HOME')) ?? ''}/${THEME_FILE}`
     const stat = await $.fs.stat(path)
     if (stat.kind !== 'file') throw new Error('no theme file')
     if (stat.mtimeMs === s.themeMtime) return
-    theme = parseTheme(String(await $.fs.read(path)))
+    theme = parseTheme(await $.fs.read(path))
     s.themeMtime = stat.mtimeMs
   } catch {
     s.themeMtime = 0
@@ -79,6 +81,16 @@ async function loadTheme($: EngineInterface, s: State) {
   if (key === s.themeKey) return
   s.themeKey = key
   await $.state.set(THEME, theme)
+}
+
+// Every 2s while the file exists, every 60s while it is missing, so a theme created later is still picked up.
+async function pollTheme($: EngineInterface, s: State, path: string) {
+  const wasFound = s.themeMtime !== 0
+  await loadTheme($, s, path)
+  const found = s.themeMtime !== 0
+  if (s.themePoll && found === wasFound) return
+  s.themePoll?.cancel()
+  s.themePoll = $.clock.every(found ? THEME_POLL_MS : THEME_IDLE_POLL_MS, () => void pollTheme($, s, path))
 }
 
 function priceOf(model: string | null): [number, number, number] | null {
@@ -354,9 +366,8 @@ export const register: Register = on => {
     const text = statusText(s, now)
     if (!text || (s.deadline && now >= s.deadline)) return rest
     const state = s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
-    // The Omarchy palette is a dark theme, so the light variant keeps its own colours.
     const theme = light || noColor ? null : ((await $.state.get(THEME)).value as Theme | null)
-    const color = noColor ? undefined : state === 'warm' ? theme?.accent ?? 'success' : state === 'cold' ? (light ? '#a84c2c' : theme?.urgent ?? 'warning') : theme?.muted
+    const color = noColor ? undefined : state === 'warm' ? theme?.accent ?? 'success' : state === 'cold' ? (light ? '#a84c2c' : theme?.urgent ?? 'warning') : theme?.dim
     const { Box, Text } = $.ui.resolve(e)
     const asset = statusIcons[light ? 'light' : 'dark'][state === 'warm' || state === 'cold' ? state : 'neutral']
     const icon = noColor ? Text({ bold: true, children: ['[>]'] })
@@ -384,9 +395,9 @@ export const register: Register = on => {
       const theme = (await $.config.list()).find(row => row.key === 'theme')?.value
       light = typeof theme === 'string' && theme.startsWith('light')
       noColor = Boolean(await $.env.get('NO_COLOR'))
-      await loadTheme($, s)
       s.themePoll?.cancel()
-      s.themePoll = $.clock.every(THEME_POLL_MS, () => void loadTheme($, s))
+      s.themePoll = null
+      await pollTheme($, s, `${(await $.env.get('HOME')) ?? ''}/${THEME_FILE}`)
       $.ui.status(undefined)
     }
     s.sid = await $.session.id()
