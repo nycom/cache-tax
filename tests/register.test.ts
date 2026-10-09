@@ -2,13 +2,17 @@ import { describe, expect, mock, test, tier } from 'claude-code/testing'
 import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
-import { fmtDuration, freshState, parseDuration, resetForClear, seedFromResume } from '../hooks/register'
+import { fmtDuration, fmtUsd, freshState, parseDuration, resetForClear, seedFromResume } from '../hooks/register'
 
 tier('user')
 
 const MIN = 60 * 1000
 const HOUR = 60 * MIN
 const START = 1_000_000
+const THEME_POLL = 2000
+const THEME_IDLE_POLL = 60_000
+// Keys and values as basecamp/omarchy ships themes/tokyo-night/colors.toml.
+const TOKYO_NIGHT = 'mode = "dark"\naccent = "#7aa2f7"\nmuted = "#414868"\nbackground = "#1a1b26"\nforeground = "#a9b1d6"\ndark_foreground = "#565f89"\nred = "#f7768e"\n'
 
 const session: SessionStartInput = { surface: null, isInteractive: false, cwd: '/work' }
 
@@ -34,7 +38,7 @@ type ForkAnswer = null | ModelForkResult | { read: number; write: number; out?: 
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; sid?: string; model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; sid?: string; model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; box?: { text: string }; colors?: { toml?: string; mtimeMs?: number } } = {}) {
   if (opts.store) {
     const store = opts.store
     on('store.get', ($, e) => ({ value: store.get(e.key) }))
@@ -43,12 +47,28 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     on('store.keys', () => ({ value: [...store.keys()] }))
   } else mock.store(on, {})
   const reads = { theme: 0, env: 0 }
-  on('env.get', ($, e) => { reads.env++; return { value: e.name === 'NO_COLOR' && opts.noColor ? '1' : undefined } })
+  const fs = { stat: 0, read: 0 }
+  on('env.get', ($, e) => { reads.env++; return { value: e.name === 'NO_COLOR' && opts.noColor ? '1' : e.name === 'HOME' ? '/home/u' : undefined } })
+  on('fs.stat', ($, e) => {
+    fs.stat++
+    if (e.path !== '/home/u/.local/state/omarchy/current/theme/colors.toml' || opts.colors?.toml === undefined) throw new Error(`ENOENT ${e.path}`)
+    return { value: { kind: 'file', size: opts.colors.toml.length, mtimeMs: opts.colors.mtimeMs ?? 1, isLink: false } }
+  })
+  on('fs.read', ($, e) => {
+    fs.read++
+    if (e.path !== '/home/u/.local/state/omarchy/current/theme/colors.toml' || opts.colors?.toml === undefined) throw new Error(`ENOENT ${e.path}`)
+    return { value: opts.colors.toml }
+  })
   on('config.list', () => {
     reads.theme++
     return { value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: opts.theme?.value ?? 'dark', provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }
   })
   on('config.set', ($, e) => opts.denyTheme ? { deny: 'theme locked' } : { value: opts.writtenTheme ?? e.value })
+  // The prompt box: a guard that drops a send puts the draft back here.
+  const box = opts.box ?? { text: '' }
+  const fills: string[] = []
+  on('prompt.read', () => ({ value: { text: box.text, cursor: box.text.length } }))
+  on('prompt.fill', ($, e) => { fills.push(e.text); box.text = e.text; return { isFilled: true } })
   const forks: number[] = []
   const status: Array<string | undefined> = []
   const logs: string[] = []
@@ -75,7 +95,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     const value: ModelForkResult = { isAnswered: true, text: 'warm', usage: { input_tokens: a.input ?? 2, output_tokens: a.out ?? 1, cache_read_input_tokens: a.read, cache_creation_input_tokens: a.write } }
     return { value }
   })
-  return { forks, status, logs, entered, reads }
+  return { forks, status, logs, entered, reads, fills, fs }
 }
 
 const warm: ForkAnswer = { read: 200000, write: 0 }
@@ -95,12 +115,12 @@ describe('cache indicator', () => {
     await $.turn.complete(turn())
     await $.command.run(run('keepwarm', '2h'))
     expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
-    expect(w.reads).toEqual({ theme: 1, env: 1 })
+    expect(w.reads).toEqual({ theme: 1, env: 2 })
     await $.config.set(themeChange('light'))
     expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.light.warm.png })
     await $.config.set(themeChange('dark'))
     expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
-    expect(w.reads).toEqual({ theme: 1, env: 1 })
+    expect(w.reads).toEqual({ theme: 1, env: 2 })
     expect(w.forks.length).toBe(0)
   })
 
@@ -125,6 +145,132 @@ describe('cache indicator', () => {
     expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.light.neutral.png })
   })
 
+  test('an Omarchy colors.toml themes the dark band and a missing file keeps the defaults', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const colors: { toml?: string } = { toml: TOKYO_NIGHT }
+    world(on, [], { colors })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.command.run(run('keepwarm', '3h every 90m'))
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    const label = /^(warm|cold|unknown|stopped)$/
+    expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('#565f89')
+    await $.turn.complete(turn())
+    expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('#7aa2f7')
+    expect((await ui.find({ type: 'Text', text: /cache-tax$/ }))?.props.color).toBe('#a9b1d6')
+    await clock.advance(HOUR)
+    expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('#f7768e')
+    colors.toml = undefined
+    await clock.advance(THEME_POLL)
+    expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('warning')
+    expect((await ui.find({ type: 'Text', text: /cache-tax$/ }))?.props.color).toBe(undefined)
+  })
+
+  test('a missing colors.toml is polled every minute and a found one every two seconds', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const colors: { toml?: string; mtimeMs?: number } = {}
+    world(on, [], { colors })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.command.run(run('keepwarm', '3h every 90m'))
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    const text = /cache-tax$/
+    colors.toml = TOKYO_NIGHT
+    await clock.advance(THEME_POLL)
+    expect((await ui.find({ type: 'Text', text }))?.props.color).toBe(undefined)
+    await clock.advance(THEME_IDLE_POLL - THEME_POLL)
+    expect((await ui.find({ type: 'Text', text }))?.props.color).toBe('#a9b1d6')
+    colors.toml = TOKYO_NIGHT.replace('#a9b1d6', '#c0caf5')
+    colors.mtimeMs = 2
+    await clock.advance(THEME_POLL)
+    expect((await ui.find({ type: 'Text', text }))?.props.color).toBe('#c0caf5')
+  })
+
+  test('the theme is written only when its colours change and HOME is read once', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let writes = 0
+    on('state.set', ($, e, next) => { writes++; return next(e) })
+    const w = world(on, [], { colors: { toml: TOKYO_NIGHT } })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    expect(writes).toBe(1)
+    const envReads = w.reads.env
+    for (let i = 0; i < 5; i++) await clock.advance(THEME_POLL)
+    expect(writes).toBe(1)
+    expect(w.reads.env).toBe(envReads)
+  })
+
+  test('an unchanged colors.toml is stat-ed but not re-read until its mtime moves', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const colors = { toml: TOKYO_NIGHT, mtimeMs: 1 }
+    const w = world(on, [], { colors })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    expect(w.fs.read).toBe(1)
+    for (let i = 0; i < 10; i++) await clock.advance(THEME_POLL)
+    expect(w.fs.stat).toBe(11)
+    expect(w.fs.read).toBe(1)
+    colors.toml = TOKYO_NIGHT.replace('#a9b1d6', '#c0caf5')
+    colors.mtimeMs = 2
+    await clock.advance(THEME_POLL)
+    expect(w.fs.read).toBe(2)
+  })
+
+  test('a missing or light colors.toml writes no theme state however often it is polled', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let writes = 0
+    on('state.set', ($, e, next) => { writes++; return next(e) })
+    const colors: { toml?: string } = {}
+    world(on, [], { colors })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    for (let i = 0; i < 5; i++) await clock.advance(THEME_IDLE_POLL)
+    expect(writes).toBe(0)
+    colors.toml = TOKYO_NIGHT.replace('mode = "dark"', 'mode = "light"')
+    await clock.advance(THEME_IDLE_POLL)
+    for (let i = 0; i < 10; i++) await clock.advance(THEME_POLL)
+    expect(writes).toBe(0)
+  })
+
+  test('the theme poll never stacks timers across a missing, found, missing cycle', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const colors: { toml?: string } = {}
+    const w = world(on, [], { colors })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    expect(w.fs.stat).toBe(1)
+    await clock.advance(THEME_IDLE_POLL - 1)
+    expect(w.fs.stat).toBe(1)
+    colors.toml = TOKYO_NIGHT
+    await clock.advance(1)
+    expect(w.fs.stat).toBe(2)
+    for (let i = 1; i <= 10; i++) {
+      await clock.advance(THEME_POLL)
+      expect(w.fs.stat).toBe(2 + i)
+    }
+    colors.toml = undefined
+    await clock.advance(THEME_POLL)
+    expect(w.fs.stat).toBe(13)
+    await clock.advance(THEME_IDLE_POLL - 1)
+    expect(w.fs.stat).toBe(13)
+    await clock.advance(1)
+    expect(w.fs.stat).toBe(14)
+  })
+
+  test('a second session.start leaves one theme poller', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { colors: { toml: TOKYO_NIGHT } })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    const before = w.fs.stat
+    await clock.advance(10 * THEME_POLL)
+    expect(w.fs.stat - before).toBe(10)
+  })
+
+  test('a light Omarchy theme applies no palette', { timeoutMs: 20_000 }, async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [], { colors: { toml: TOKYO_NIGHT.replace('mode = "dark"', 'mode = "light"') } })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.command.run(run('keepwarm', '3h every 90m'))
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    expect((await ui.find({ type: 'Text', text: /^unknown$/ }))?.props.color).toBe(undefined)
+    expect((await ui.find({ type: 'Text', text: /cache-tax$/ }))?.props.color).toBe(undefined)
+  })
+
   for (const surface of ['terminal', 'desktop'] as const) {
     test(`${surface}: official cube follows state and theme with a text alternative`, async ($, on) => {
       const clock = mock.clock(on, { now: 10 * HOUR })
@@ -146,7 +292,7 @@ describe('cache indicator', () => {
       await $.config.set(themeChange('light'))
       await clock.advance(HOUR)
       expect((await ui.find({ type }))?.props.source).toEqual(surface === 'terminal' ? { png: statusIcons.light.cold.png } : statusIcons.light.cold.svg)
-      expect((await ui.find({ type: 'Text', text: /^cold$/ }))?.props.color).toBe('#c15f3c')
+      expect((await ui.find({ type: 'Text', text: /^cold$/ }))?.props.color).toBe('#a84c2c')
       expect(w.forks.length).toBe(0)
       await $.command.run(run('keepwarm', 'off'))
       expect(await ui.find({ type })).toBe(undefined)
@@ -180,9 +326,9 @@ describe('cache indicator', () => {
       expect((await ui.find({ type: 'Text', text: /^(warm|cold|unknown|stopped)$/ }))?.props.color).toBe('success')
       expect((await ui.find({ type: 'Text', text: 'cache-tax' }))?.text).toMatch(/warm.*ping in 1h30m/)
       await clock.advance(HOUR)
-      expect((await ui.find({ type: 'Text', text: /^(warm|cold|unknown|stopped)$/ }))?.props.color).toBe('#d97757')
+      expect((await ui.find({ type: 'Text', text: /^(warm|cold|unknown|stopped)$/ }))?.props.color).toBe('warning')
       expect((await ui.find({ type: 'Text', text: 'cache-tax' }))?.text).toMatch(/cold.*cold now/)
-      expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/state       COLD/)
+      expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/state       cold/)
       expect(w.forks.length).toBe(0)
       expect((await ui.find({ text: /^other mod$/ }))?.text).toBe('other mod')
       await $.turn.complete(turn())
@@ -201,7 +347,7 @@ describe('cache indicator', () => {
     await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
     const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
     await $.classic.SessionStart({ source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
-    expect((await ui.find({ type: 'Text', text: /^(warm|cold|unknown|stopped)$/ }))?.props.color).toBe('#d97757')
+    expect((await ui.find({ type: 'Text', text: /^(warm|cold|unknown|stopped)$/ }))?.props.color).toBe('warning')
     await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
     expect((await ui.find({ type: 'Text', text: /^(warm|cold|unknown|stopped)$/ }))?.props.color).toBe(undefined)
     expect((await ui.find({ type: 'Text', text: 'cache-tax' }))?.text).toMatch(/unknown.*after compaction/)
@@ -240,7 +386,7 @@ describe('cache indicator', () => {
     await $.turn.complete(turn({ agentId: 'worker' }))
     await $.session.compact({ trigger: 'manual', agentId: 'worker', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
     await clock.advance(30 * MIN)
-    expect((await ui.find({ type: 'Text', text: /^(warm|cold|unknown|stopped)$/ }))?.props.color).toBe('#d97757')
+    expect((await ui.find({ type: 'Text', text: /^(warm|cold|unknown|stopped)$/ }))?.props.color).toBe('warning')
     expect(w.forks.length).toBe(0)
   })
 
@@ -304,7 +450,27 @@ describe('parse and format', () => {
     expect(parseDuration('soon')).toBe(null)
     expect(fmtDuration(150 * MIN)).toBe('2h30m')
     expect(fmtDuration(7 * MIN)).toBe('7m')
-    expect(fmtDuration((15 * 24 + 9) * 60 * MIN)).toBe('15d 9h')
+    expect(fmtDuration((15 * 24 + 9) * 60 * MIN)).toBe('15d09h')
+  })
+
+  test('one duration style: 49m, 1h05m, 2d03h', async () => {
+    expect(fmtDuration(0)).toBe('0m')
+    expect(fmtDuration(49 * MIN)).toBe('49m')
+    expect(fmtDuration(65 * MIN)).toBe('1h05m')
+    expect(fmtDuration(47 * HOUR + 59 * MIN)).toBe('47h59m')
+    expect(fmtDuration(48 * HOUR)).toBe('2d00h')
+    expect(fmtDuration(51 * HOUR)).toBe('2d03h')
+  })
+
+  test('money: two decimals always, a floor for sub-cent, words for unknown', async () => {
+    expect(fmtUsd(null)).toBe('price unknown')
+    expect(fmtUsd(0)).toBe('$0.00')
+    expect(fmtUsd(0.004)).toBe('<$0.01')
+    expect(fmtUsd(0.0099)).toBe('<$0.01')
+    expect(fmtUsd(0.01)).toBe('$0.01')
+    expect(fmtUsd(4.005)).toBe('$4.01')
+    expect(fmtUsd(100)).toBe('$100.00')
+    expect(fmtUsd(1234.5)).toBe('$1,234.50')
   })
 })
 
@@ -316,11 +482,42 @@ describe('guard', () => {
     await $.turn.complete(turn())
     await clock.advance(3 * HOUR)
     const first = await $.prompt.submit(prompt('hi'))
-    expect(first.drop).toMatch(/cache-tax: the prompt cache went cold 2h00m ago\. Sending this re-writes up to 200,502 tokens at \$20\/MTok = \$4\.01/)
+    expect(first.drop).toBe('Not sent: cache cold 2h00m. Resending re-writes up to 200,502 tokens ≈ $4.01 (warm turn: $0.05). Send again to pay (keepwarm then holds the cache 3h00m), or /clear.')
     expect(w.entered).toEqual([])
     const second = await $.prompt.submit(prompt('hi'))
     expect(second.drop).toBe(undefined)
     expect(w.entered).toEqual(['hi'])
+  })
+
+  test('the refused prompt goes back in the box once, and never over a newer draft', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const box = { text: '' }
+    const w = world(on, [], { box })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('explain the diff'))).drop).toMatch(/^Not sent: /)
+    expect(w.fills).toEqual(['explain the diff'])
+    expect(box.text).toBe('explain the diff')
+    await $.prompt.submit(prompt('explain the diff'))
+    expect(w.fills).toEqual(['explain the diff'])
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    box.text = 'typed since'
+    await $.prompt.submit(prompt('again'))
+    expect(w.fills).toEqual(['explain the diff'])
+    expect(box.text).toBe('typed since')
+  })
+
+  test('an unpriced model says so instead of printing n/a', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [], { model: 'mystery-1' })
+    await $.session.start(session)
+    await $.turn.complete(turn({ usage: usage({ model: 'mystery-1' }) }))
+    await clock.advance(3 * HOUR)
+    const r = await $.prompt.submit(prompt('hi'))
+    expect(r.drop).toBe('Not sent: cache cold 2h00m. Resending re-writes up to 200,502 tokens, price unknown. Send again to pay (keepwarm then holds the cache 3h00m), or /clear.')
+    expect((await $.command.run(run('cache-tax', ''))).text).toMatch(/cold cost   price unknown\n/)
   })
 
   test('lets slash commands, warm sends and small contexts through', async ($, on) => {
@@ -458,6 +655,67 @@ describe('keepwarm', () => {
     expect(w.status.at(-1)).toMatch(/keepwarm 5h10m left · ping in 50m · last ping read 200k \$0\.05/)
     await clock.advance(50 * MIN)
     expect(w.forks.length).toBe(2)
+  })
+
+  test('the status countdown refreshes every minute and the timer dies with the window', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start({ ...session, surface: 'vscode' })
+    await $.command.run(run('keepwarm', '6h'))
+    await $.turn.complete(turn())
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '6h'))
+    const before = w.status.length
+    await clock.advance(3 * MIN)
+    // Three redraws in three minutes: re-arming never stacks a second timer.
+    expect(w.status.length - before).toBe(3)
+    expect(w.status.at(-1)).toBe('keepwarm 5h57m left · ping in 47m')
+    await $.command.run(run('keepwarm', 'off'))
+    const off = w.status.length
+    await clock.advance(10 * MIN)
+    expect(w.status.length).toBe(off)
+    await $.command.run(run('keepwarm', '2m'))
+    await clock.advance(2 * MIN)
+    const ended = w.status.length
+    expect(w.status.at(-1)).toBe(undefined)
+    await clock.advance(10 * MIN)
+    expect(w.status.length).toBe(ended)
+    expect(w.forks.length).toBe(0)
+  })
+
+  test('two arm() calls racing leave one countdown timer', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start({ ...session, surface: 'vscode' })
+    await $.command.run(run('keepwarm', '6h'))
+    await Promise.all([$.turn.complete(turn()), $.turn.complete(turn()), $.command.run(run('keepwarm', '6h'))])
+    const before = w.status.length
+    await clock.advance(3 * MIN)
+    expect(w.status.length - before).toBe(3)
+  })
+
+  test('the band countdown redraws as time passes', async ($, on) => {
+    const clock = mock.clock(on, { now: 10 * HOUR })
+    world(on, [])
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.command.run(run('keepwarm', '3h every 90m'))
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    await $.turn.complete(turn())
+    expect((await ui.find({ type: 'Text', text: 'cache-tax' }))?.text).toMatch(/ping in 1h30m/)
+    await clock.advance(5 * MIN)
+    expect((await ui.find({ type: 'Text', text: 'cache-tax' }))?.text).toMatch(/ping in 1h25m/)
+  })
+
+  test('the band leads with state and time and truncates its tail', async ($, on) => {
+    mock.clock(on, { now: 10 * HOUR })
+    world(on, [])
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.command.run(run('keepwarm', '3h every 90m'))
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    await $.turn.complete(turn())
+    const row = await ui.find({ type: 'Text', text: 'cache-tax' })
+    expect(row?.props.wrap).toBe('truncate-end')
+    expect(row?.text.trim()).toMatch(/^warm · keepwarm 3h00m left · ping in 1h30m.* · cache-tax$/)
   })
 
   test('a new turn resets the countdown', async ($, on) => {
@@ -649,7 +907,7 @@ describe('keepwarm', () => {
     await $.session.start(session)
     await $.turn.complete(turn())
     const card = await $.command.run(run('cache-tax', ''))
-    expect(card.text).toMatch(/break-even  up to 80 pings at the read rate cost one cold write, about 2d 18h of idle at one ping per 50m/)
+    expect(card.text).toMatch(/break-even  up to 80 pings at the read rate cost one cold write, about 2d18h of idle at one ping per 50m/)
   })
 
   test('/keepwarm on a cold session schedules no fork before a turn, and does after one', async ($, on) => {

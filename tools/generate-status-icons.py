@@ -11,8 +11,9 @@ icons = {}
 for theme in ("dark", "light"):
     original = (root / f"site/assets/cache-tax-{theme}.svg").read_text()
     brand = "#d97757" if theme == "dark" else "#c15f3c"
-    colors = {"warm": "#78b85a" if theme == "dark" else "#397527",
-              "cold": brand, "neutral": "#92928b" if theme == "dark" else "#686861"}
+    # Dark lids sit at 3:1 or better against both the light outline and the dark host backgrounds.
+    colors = {"warm": "#669c4c" if theme == "dark" else "#397527",
+              "cold": "#ce7153" if theme == "dark" else brand, "neutral": "#8b8b84" if theme == "dark" else "#686861"}
     icons[theme] = {}
     for state, color in colors.items():
         svg = original.replace(brand, color)
