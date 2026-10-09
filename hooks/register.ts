@@ -4,6 +4,7 @@ import { statusIcons } from './status-icons'
 const TTL_MS = 60 * 60 * 1000
 const PING_AFTER_MS = 50 * 60 * 1000
 const MIN_PING_MS = 60 * 1000
+const REFRESH_MS = 60 * 1000
 const AUTO_WARM_MS = 3 * 60 * 60 * 1000
 const DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1000
 const BIG_TOKENS = 50000
@@ -44,6 +45,7 @@ export type State = {
   coldWritePending: boolean
   misses: Miss[]
   pending: { cancel: () => void } | null
+  tick: { cancel: () => void } | null
   last: PingRecord | null
   stopped: string | null
 }
@@ -64,12 +66,13 @@ export function fmtDuration(ms: number): string {
   const total = Math.max(0, Math.round(ms / 60000))
   const h = Math.floor(total / 60)
   const m = total % 60
-  if (h >= 48) return `${Math.floor(h / 24)}d ${h % 24}h`
+  if (h >= 48) return `${Math.floor(h / 24)}d${String(h % 24).padStart(2, '0')}h`
   return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m`
 }
 
-function fmtUsd(usd: number | null): string {
-  return usd == null ? 'n/a' : '$' + (usd >= 100 ? usd.toFixed(0) : usd.toFixed(2))
+export function fmtUsd(usd: number | null): string {
+  if (usd == null) return 'price unknown'
+  return usd > 0 && usd < 0.01 ? '<$0.01' : '$' + usd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 function fmtTok(n: number): string {
@@ -102,13 +105,12 @@ function isCold(s: State, now: number): boolean {
   return s.lastRequestAt > 0 && !s.compacted && now - s.lastRequestAt >= TTL_MS
 }
 
-function guardText(s: State, now: number): string {
-  const price = priceOf(s.lastModel)
-  const rate = price ? `$${price[1]}/MTok` : 'the cache-write rate'
+/** What follows "cache cold ": for how long, then the upper-bound rewrite price. */
+function coldCost(s: State, now: number, verb: string): string {
+  const cold = coldUsd(s)
   const warm = warmUsd(s)
-  return `the prompt cache went cold ${fmtDuration(now - s.lastRequestAt - TTL_MS)} ago. Sending this re-writes ` +
-    `up to ${s.ctx.toLocaleString('en-US')} tokens at ${rate} = ${fmtUsd(coldUsd(s))}` +
-    (warm == null ? '' : ` (a warm turn would have cost ${fmtUsd(warm)})`) + '.'
+  const price = cold == null ? ', price unknown' : ` ≈ ${fmtUsd(cold)}` + (warm == null ? '' : ` (warm turn: ${fmtUsd(warm)})`)
+  return `${fmtDuration(now - s.lastRequestAt - TTL_MS)}. ${verb} re-writes up to ${s.ctx.toLocaleString('en-US')} tokens${price}.`
 }
 
 export type ResumeFields = {
@@ -139,8 +141,8 @@ export function seedFromResume(s: State, e: ResumeFields, now: number): string |
   if (typeof e.model === 'string') s.lastModel = e.model
   s.compacted = false
   if (e.prompt_cache_likely_expired !== true || s.ctx < BIG_TOKENS) return null
-  const usd = typeof e.estimated_cache_write_usd === 'number' ? fmtUsd(e.estimated_cache_write_usd) : fmtUsd(coldUsd(s))
-  return `resuming cold. The first message re-writes ${s.ctx.toLocaleString('en-US')} tokens, about ${usd}. /clear and paste a summary if you only need the conclusions.`
+  const usd = typeof e.estimated_cache_write_usd === 'number' ? e.estimated_cache_write_usd : coldUsd(s)
+  return `resuming cold. The first message re-writes ${s.ctx.toLocaleString('en-US')} tokens${usd == null ? ', price unknown' : `, about ${fmtUsd(usd)}`}. /clear and paste a summary if you only need the conclusions.`
 }
 
 function statusText(s: State, now: number): string | undefined {
@@ -162,6 +164,8 @@ function updateStatus($: EngineInterface, s: State, now: number) {
 function disarm(s: State) {
   if (s.pending) s.pending.cancel()
   s.pending = null
+  if (s.tick) s.tick.cancel()
+  s.tick = null
 }
 
 // The window and its ping period belong to the session that armed them, so a
@@ -214,6 +218,9 @@ async function arm($: EngineInterface, s: State) {
     s.pending = $.clock.after(s.deadline - now, () => { void arm($, s) })
   }
   updateStatus($, s, now)
+  // The countdown reads the clock, so redraw it every minute while armed. One timer: arm and stop both go through disarm.
+  if (s.tick) s.tick.cancel()
+  s.tick = $.clock.every(REFRESH_MS, async () => { if (s.deadline) updateStatus($, s, await $.clock.now()) })
 }
 
 async function ping($: EngineInterface, s: State) {
@@ -271,10 +278,11 @@ function card(s: State, now: number): string {
   lines.push(`${s.lastModel ?? 'model not seen yet'}`)
   if (s.compacted) lines.push('state       reset by compaction, waiting for the first turn')
   else if (!s.lastRequestAt) lines.push('state       no request yet this session')
-  else if (isCold(s, now)) lines.push(`state       COLD, last request ${fmtDuration(now - s.lastRequestAt)} ago`)
+  else if (isCold(s, now)) lines.push(`state       cold, last request ${fmtDuration(now - s.lastRequestAt)} ago`)
   else lines.push(`state       warm, ${fmtDuration(s.lastRequestAt + TTL_MS - now)} left`)
   lines.push(`context     ${s.ctx.toLocaleString('en-US')} tokens`)
-  lines.push(`cold cost   ${fmtUsd(coldUsd(s))} to re-write it (warm turn ${fmtUsd(warmUsd(s))})`)
+  const cold = coldUsd(s)
+  lines.push(`cold cost   ${cold == null ? 'price unknown' : `${fmtUsd(cold)} to re-write it (warm turn ${fmtUsd(warmUsd(s))})`}`)
   const always = s.always ? ' (always)' : ''
   const idle = s.always ? 'off until the next session start, which arms 6h00m (always)' : 'off (/keepwarm to arm it for 6h00m)'
   lines.push(`keepwarm    ${s.deadline ? (statusText(s, now) ?? '').replace(/^keepwarm /, 'on, ') + always : s.stopped ? `stopped, ${s.stopped}${always}` : idle}`)
@@ -289,12 +297,13 @@ function card(s: State, now: number): string {
 export function freshState(): State {
   return {
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
-    guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null,
+    guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, tick: null, last: null, stopped: null,
   }
 }
 
 export const register: Register = on => {
   const s = freshState()
+  // ponytail: the theme setting 'auto' has no resolved value in the API, so the icon takes the dark variant (the terminal image is edged for both backgrounds) and the cold label the host's warning token (4.47:1 on the light theme, 9.3:1 on dark); only a known light theme gets #a84c2c (5.34:1 on #faf9f5).
   let light = false
   let noColor = false
 
@@ -314,7 +323,7 @@ export const register: Register = on => {
     const text = statusText(s, now)
     if (!text || (s.deadline && now >= s.deadline)) return rest
     const state = s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
-    const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined
+    const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#a84c2c' : 'warning') : undefined
     const { Box, Text } = $.ui.resolve(e)
     const asset = statusIcons[light ? 'light' : 'dark'][state === 'warm' || state === 'cold' ? state : 'neutral']
     const icon = noColor ? Text({ bold: true, children: ['[>]'] })
@@ -325,10 +334,11 @@ export const register: Register = on => {
       rest,
       Box({ flexDirection: 'row', alignItems: 'center', children: [
         Box({ flexShrink: 0, children: [icon] }),
-        Text({ children: [
-          ' cache-tax · ',
+        // State and time lead so a narrow terminal cuts the tail, never them.
+        Text({ wrap: 'truncate-end', children: [
+          ' ',
           Text({ color, bold: true, children: [state] }),
-          ` · ${text}`,
+          ` · ${text} · cache-tax`,
         ] }),
       ] }),
     ] })
@@ -452,7 +462,7 @@ export const register: Register = on => {
     const now = await $.clock.now()
     if (!isCold(s, now) || s.ctx < BIG_TOKENS) return next(e)
     if (s.guard === 'warn') {
-      $.ui.log(`${guardText(s, now)} Sending anyway; keepwarm will hold the cache for ${fmtDuration(AUTO_WARM_MS)} once it lands.`)
+      $.ui.log(`Cache cold ${coldCost(s, now, 'This send')} Sending anyway; keepwarm will hold the cache for ${fmtDuration(AUTO_WARM_MS)} once it lands.`)
       s.coldWritePending = true
       return next(e)
     }
@@ -462,7 +472,11 @@ export const register: Register = on => {
       return next(e)
     }
     s.ackedAt = s.lastRequestAt
-    return { drop: `cache-tax: ${guardText(s, now)} Send it again to pay it, and keepwarm will then hold the cache for ${fmtDuration(AUTO_WARM_MS)}. Or /clear and start from a note.` }
+    // The draft is gone once a prompt is submitted; put it back so "send again" is one Enter. A guard must still drop if this fails.
+    try {
+      if (!(await $.prompt.read()).text) await $.prompt.fill({ text: e.text })
+    } catch {}
+    return { drop: `Not sent: cache cold ${coldCost(s, now, 'Resending')} Send again to pay (keepwarm then holds the cache ${fmtDuration(AUTO_WARM_MS)}), or /clear.` }
   })
 
   on('turn.step', async function* ($, e, next) {
