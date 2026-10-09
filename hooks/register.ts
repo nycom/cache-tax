@@ -218,7 +218,7 @@ async function arm($: EngineInterface, s: State) {
     s.pending = $.clock.after(s.deadline - now, () => { void arm($, s) })
   }
   updateStatus($, s, now)
-  // The countdown reads the clock, so redraw it every minute while armed. One timer: arm and stop both go through disarm.
+  // The countdown reads the clock, so redraw it every minute while armed. Stop, clear and compaction end it through disarm. Cancelling here is what keeps two concurrent arm() calls, both past disarm before either sets a tick, from stacking two timers.
   if (s.tick) s.tick.cancel()
   s.tick = $.clock.every(REFRESH_MS, async () => { if (s.deadline) updateStatus($, s, await $.clock.now()) })
 }
