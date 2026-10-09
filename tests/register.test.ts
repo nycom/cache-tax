@@ -47,12 +47,15 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     on('store.keys', () => ({ value: [...store.keys()] }))
   } else mock.store(on, {})
   const reads = { theme: 0, env: 0 }
+  const fs = { stat: 0, read: 0 }
   on('env.get', ($, e) => { reads.env++; return { value: e.name === 'NO_COLOR' && opts.noColor ? '1' : e.name === 'HOME' ? '/home/u' : undefined } })
   on('fs.stat', ($, e) => {
+    fs.stat++
     if (e.path !== '/home/u/.local/state/omarchy/current/theme/colors.toml' || opts.colors?.toml === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: { kind: 'file', size: opts.colors.toml.length, mtimeMs: opts.colors.mtimeMs ?? 1, isLink: false } }
   })
   on('fs.read', ($, e) => {
+    fs.read++
     if (e.path !== '/home/u/.local/state/omarchy/current/theme/colors.toml' || opts.colors?.toml === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: opts.colors.toml }
   })
@@ -92,7 +95,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     const value: ModelForkResult = { isAnswered: true, text: 'warm', usage: { input_tokens: a.input ?? 2, output_tokens: a.out ?? 1, cache_read_input_tokens: a.read, cache_creation_input_tokens: a.write } }
     return { value }
   })
-  return { forks, status, logs, entered, reads, fills }
+  return { forks, status, logs, entered, reads, fills, fs }
 }
 
 const warm: ForkAnswer = { read: 200000, write: 0 }
@@ -192,6 +195,70 @@ describe('cache indicator', () => {
     for (let i = 0; i < 5; i++) await clock.advance(THEME_POLL)
     expect(writes).toBe(1)
     expect(w.reads.env).toBe(envReads)
+  })
+
+  test('an unchanged colors.toml is stat-ed but not re-read until its mtime moves', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const colors = { toml: TOKYO_NIGHT, mtimeMs: 1 }
+    const w = world(on, [], { colors })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    expect(w.fs.read).toBe(1)
+    for (let i = 0; i < 10; i++) await clock.advance(THEME_POLL)
+    expect(w.fs.stat).toBe(11)
+    expect(w.fs.read).toBe(1)
+    colors.toml = TOKYO_NIGHT.replace('#a9b1d6', '#c0caf5')
+    colors.mtimeMs = 2
+    await clock.advance(THEME_POLL)
+    expect(w.fs.read).toBe(2)
+  })
+
+  test('a missing or light colors.toml writes no theme state however often it is polled', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let writes = 0
+    on('state.set', ($, e, next) => { writes++; return next(e) })
+    const colors: { toml?: string } = {}
+    world(on, [], { colors })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    for (let i = 0; i < 5; i++) await clock.advance(THEME_IDLE_POLL)
+    expect(writes).toBe(0)
+    colors.toml = TOKYO_NIGHT.replace('mode = "dark"', 'mode = "light"')
+    await clock.advance(THEME_IDLE_POLL)
+    for (let i = 0; i < 10; i++) await clock.advance(THEME_POLL)
+    expect(writes).toBe(0)
+  })
+
+  test('the theme poll never stacks timers across a missing, found, missing cycle', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const colors: { toml?: string } = {}
+    const w = world(on, [], { colors })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    expect(w.fs.stat).toBe(1)
+    await clock.advance(THEME_IDLE_POLL - 1)
+    expect(w.fs.stat).toBe(1)
+    colors.toml = TOKYO_NIGHT
+    await clock.advance(1)
+    expect(w.fs.stat).toBe(2)
+    for (let i = 1; i <= 10; i++) {
+      await clock.advance(THEME_POLL)
+      expect(w.fs.stat).toBe(2 + i)
+    }
+    colors.toml = undefined
+    await clock.advance(THEME_POLL)
+    expect(w.fs.stat).toBe(13)
+    await clock.advance(THEME_IDLE_POLL - 1)
+    expect(w.fs.stat).toBe(13)
+    await clock.advance(1)
+    expect(w.fs.stat).toBe(14)
+  })
+
+  test('a second session.start leaves one theme poller', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { colors: { toml: TOKYO_NIGHT } })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    const before = w.fs.stat
+    await clock.advance(10 * THEME_POLL)
+    expect(w.fs.stat - before).toBe(10)
   })
 
   test('a light Omarchy theme applies no palette', { timeoutMs: 20_000 }, async ($, on) => {
