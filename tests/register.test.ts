@@ -9,6 +9,7 @@ tier('user')
 const MIN = 60 * 1000
 const HOUR = 60 * MIN
 const START = 1_000_000
+const THEME_POLL = 2000
 
 const session: SessionStartInput = { surface: null, isInteractive: false, cwd: '/work' }
 
@@ -34,7 +35,7 @@ type ForkAnswer = null | ModelForkResult | { read: number; write: number; out?: 
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; sid?: string; model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; box?: { text: string } } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; sid?: string; model?: string; bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; box?: { text: string }; colors?: { toml?: string; mtimeMs?: number } } = {}) {
   if (opts.store) {
     const store = opts.store
     on('store.get', ($, e) => ({ value: store.get(e.key) }))
@@ -43,7 +44,15 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     on('store.keys', () => ({ value: [...store.keys()] }))
   } else mock.store(on, {})
   const reads = { theme: 0, env: 0 }
-  on('env.get', ($, e) => { reads.env++; return { value: e.name === 'NO_COLOR' && opts.noColor ? '1' : undefined } })
+  on('env.get', ($, e) => { reads.env++; return { value: e.name === 'NO_COLOR' && opts.noColor ? '1' : e.name === 'HOME' ? '/home/u' : undefined } })
+  on('fs.stat', ($, e) => {
+    if (e.path !== '/home/u/.local/state/omarchy/current/theme/colors.toml' || opts.colors?.toml === undefined) throw new Error(`ENOENT ${e.path}`)
+    return { value: { kind: 'file', size: opts.colors.toml.length, mtimeMs: opts.colors.mtimeMs ?? 1, isLink: false } }
+  })
+  on('fs.read', ($, e) => {
+    if (e.path !== '/home/u/.local/state/omarchy/current/theme/colors.toml' || opts.colors?.toml === undefined) throw new Error(`ENOENT ${e.path}`)
+    return { value: opts.colors.toml }
+  })
   on('config.list', () => {
     reads.theme++
     return { value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: opts.theme?.value ?? 'dark', provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }
@@ -100,12 +109,12 @@ describe('cache indicator', () => {
     await $.turn.complete(turn())
     await $.command.run(run('keepwarm', '2h'))
     expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
-    expect(w.reads).toEqual({ theme: 1, env: 1 })
+    expect(w.reads).toEqual({ theme: 1, env: 2 })
     await $.config.set(themeChange('light'))
     expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.light.warm.png })
     await $.config.set(themeChange('dark'))
     expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.dark.warm.png })
-    expect(w.reads).toEqual({ theme: 1, env: 1 })
+    expect(w.reads).toEqual({ theme: 1, env: 2 })
     expect(w.forks.length).toBe(0)
   })
 
@@ -128,6 +137,40 @@ describe('cache indicator', () => {
     const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
     await $.config.set(themeChange('dark'))
     expect((await ui.find({ type: 'Image' }))?.props.source).toEqual({ png: statusIcons.light.neutral.png })
+  })
+
+  test('an Omarchy colors.toml themes the dark band and a missing file keeps the defaults', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const colors: { toml?: string } = { toml: 'foreground = "#c0caf5"\naccent = "#7aa2f7"\nmuted = "#565f89"\nred = "#f7768e"\n' }
+    world(on, [], { colors })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.command.run(run('keepwarm', '3h every 90m'))
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    const label = /^(warm|cold|unknown|stopped)$/
+    expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('#565f89')
+    await $.turn.complete(turn())
+    expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('#7aa2f7')
+    expect((await ui.find({ type: 'Text', text: /cache-tax$/ }))?.props.color).toBe('#c0caf5')
+    await clock.advance(HOUR)
+    expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('#f7768e')
+    colors.toml = undefined
+    await clock.advance(THEME_POLL)
+    expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('warning')
+    expect((await ui.find({ type: 'Text', text: /cache-tax$/ }))?.props.color).toBe(undefined)
+  })
+
+  test('an Omarchy colors.toml written after session start is picked up by the poll', { timeoutMs: 20_000 }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const colors: { toml?: string } = {}
+    world(on, [], { colors })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.command.run(run('keepwarm', '3h every 90m'))
+    const ui = await $.ui.mount({ plugin: 'cache-tax', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    const label = /^(warm|cold|unknown|stopped)$/
+    expect((await ui.find({ type: 'Text', text: label }))?.props.color).not.toBe('#565f89')
+    colors.toml = 'foreground = "#c0caf5"\naccent = "#7aa2f7"\nmuted = "#565f89"\nred = "#f7768e"\n'
+    await clock.advance(THEME_POLL)
+    expect((await ui.find({ type: 'Text', text: label }))?.props.color).toBe('#565f89')
   })
 
   for (const surface of ['terminal', 'desktop'] as const) {

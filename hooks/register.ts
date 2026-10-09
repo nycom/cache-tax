@@ -13,6 +13,9 @@ const KEY_DEADLINE = 'deadline'
 const KEY_EVERY = 'every'
 const KEY_GUARD = 'guard'
 const KEY_ALWAYS = 'always'
+const THEME_FILE = '.local/state/omarchy/current/theme/colors.toml'
+const THEME_POLL_MS = 2000
+const THEME = { plugin: 'cache-tax', key: 'theme' } as const
 
 // $ per million tokens, [cache read, 1h cache write, output], list prices September 2026.
 // Longer family names first: a model id matches the first row it contains.
@@ -29,6 +32,7 @@ const PRICES: Array<[string, number, number, number]> = [
 type PingRecord = { at: number; read: number; write: number; usd: number | null; warm: boolean }
 type Miss = { at: number; tokens: number; usd: number | null }
 type GuardMode = 'refuse' | 'warn'
+type Theme = { fg?: string; accent?: string; muted?: string; urgent?: string }
 
 export type State = {
   hasBand: boolean
@@ -48,6 +52,33 @@ export type State = {
   tick: { cancel: () => void } | null
   last: PingRecord | null
   stopped: string | null
+  themeKey: string
+  themeMtime: number
+  themePoll: { cancel: () => void } | null
+}
+
+function parseTheme(toml: string): Theme {
+  const get = (k: string) => toml.match(new RegExp(`^${k}\\s*=\\s*"(#[0-9a-fA-F]{6})"`, 'm'))?.[1]
+  return { fg: get('foreground') ?? get('color7'), accent: get('accent') ?? get('color4'), muted: get('muted') ?? get('color8'), urgent: get('red') ?? get('color1') }
+}
+
+// The Omarchy palette lives in an atom so the band redraws; it is written only when the file's colours changed, since a write redraws every reader. The poll stats first, so an unchanged file is not re-read.
+async function loadTheme($: EngineInterface, s: State) {
+  let theme: Theme | null = null
+  try {
+    const path = `${(await $.env.get('HOME')) ?? ''}/${THEME_FILE}`
+    const stat = await $.fs.stat(path)
+    if (stat.kind !== 'file') throw new Error('no theme file')
+    if (stat.mtimeMs === s.themeMtime) return
+    theme = parseTheme(String(await $.fs.read(path)))
+    s.themeMtime = stat.mtimeMs
+  } catch {
+    s.themeMtime = 0
+  }
+  const key = JSON.stringify(theme)
+  if (key === s.themeKey) return
+  s.themeKey = key
+  await $.state.set(THEME, theme)
 }
 
 function priceOf(model: string | null): [number, number, number] | null {
@@ -297,7 +328,7 @@ function card(s: State, now: number): string {
 export function freshState(): State {
   return {
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
-    guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, tick: null, last: null, stopped: null,
+    guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, tick: null, last: null, stopped: null, themeKey: 'null', themeMtime: 0, themePoll: null,
   }
 }
 
@@ -323,7 +354,9 @@ export const register: Register = on => {
     const text = statusText(s, now)
     if (!text || (s.deadline && now >= s.deadline)) return rest
     const state = s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
-    const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#a84c2c' : 'warning') : undefined
+    // The Omarchy palette is a dark theme, so the light variant keeps its own colours.
+    const theme = light || noColor ? null : ((await $.state.get(THEME)).value as Theme | null)
+    const color = noColor ? undefined : state === 'warm' ? theme?.accent ?? 'success' : state === 'cold' ? (light ? '#a84c2c' : theme?.urgent ?? 'warning') : theme?.muted
     const { Box, Text } = $.ui.resolve(e)
     const asset = statusIcons[light ? 'light' : 'dark'][state === 'warm' || state === 'cold' ? state : 'neutral']
     const icon = noColor ? Text({ bold: true, children: ['[>]'] })
@@ -335,7 +368,7 @@ export const register: Register = on => {
       Box({ flexDirection: 'row', alignItems: 'center', children: [
         Box({ flexShrink: 0, children: [icon] }),
         // State and time lead so a narrow terminal cuts the tail, never them.
-        Text({ wrap: 'truncate-end', children: [
+        Text({ wrap: 'truncate-end', color: theme?.fg, children: [
           ' ',
           Text({ color, bold: true, children: [state] }),
           ` · ${text} · cache-tax`,
@@ -351,6 +384,9 @@ export const register: Register = on => {
       const theme = (await $.config.list()).find(row => row.key === 'theme')?.value
       light = typeof theme === 'string' && theme.startsWith('light')
       noColor = Boolean(await $.env.get('NO_COLOR'))
+      await loadTheme($, s)
+      s.themePoll?.cancel()
+      s.themePoll = $.clock.every(THEME_POLL_MS, () => void loadTheme($, s))
       $.ui.status(undefined)
     }
     s.sid = await $.session.id()
