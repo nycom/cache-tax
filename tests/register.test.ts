@@ -49,14 +49,16 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
   const reads = { theme: 0, env: 0 }
   const fs = { stat: 0, read: 0 }
   on('env.get', ($, e) => { reads.env++; return { value: e.name === 'NO_COLOR' && opts.noColor ? '1' : e.name === 'HOME' ? '/home/u' : undefined } })
+  // Windows hands the hook C:\home\u\..., so compare with forward slashes and ignore the drive.
+  const isThemeFile = (p: string) => p.replace(/\\/g, '/').endsWith('/home/u/.local/state/omarchy/current/theme/colors.toml')
   on('fs.stat', ($, e) => {
     fs.stat++
-    if (e.path !== '/home/u/.local/state/omarchy/current/theme/colors.toml' || opts.colors?.toml === undefined) throw new Error(`ENOENT ${e.path}`)
+    if (!isThemeFile(e.path) || opts.colors?.toml === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: { kind: 'file', size: opts.colors.toml.length, mtimeMs: opts.colors.mtimeMs ?? 1, isLink: false } }
   })
   on('fs.read', ($, e) => {
     fs.read++
-    if (e.path !== '/home/u/.local/state/omarchy/current/theme/colors.toml' || opts.colors?.toml === undefined) throw new Error(`ENOENT ${e.path}`)
+    if (!isThemeFile(e.path) || opts.colors?.toml === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: opts.colors.toml }
   })
   on('config.list', () => {
