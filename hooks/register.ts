@@ -7,7 +7,7 @@ const PING_AFTER_MS = 50 * 60 * 1000
 const MIN_PING_MS = 60 * 1000
 const REFRESH_MS = 60 * 1000
 const AUTO_WARM_MS = 3 * 60 * 60 * 1000
-const DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1000
+const DEFAULT_WINDOW_MS = 1 * 60 * 60 * 1000
 const BIG_TOKENS = 50000
 const PING_PROMPT = 'Reply with the single word: warm'
 const KEY_DEADLINE = 'deadline'
@@ -327,7 +327,7 @@ function card(s: State, now: number): string {
   const cold = coldUsd(s)
   lines.push(`cold cost   ${cold == null ? 'price unknown' : `${fmtUsd(cold)} to re-write it (warm turn ${fmtUsd(warmUsd(s))})`}`)
   const always = s.always ? ' (always)' : ''
-  const idle = s.always ? 'off until the next session start, which arms 6h00m (always)' : 'off (/keepwarm to arm it for 6h00m)'
+  const idle = s.always ? `off until the next session start, which arms ${fmtDuration(DEFAULT_WINDOW_MS)} (always)` : `off (/keepwarm to arm it for ${fmtDuration(DEFAULT_WINDOW_MS)})`
   lines.push(`keepwarm    ${s.deadline ? (statusText(s, now) ?? '').replace(/^keepwarm /, 'on, ') + always : s.stopped ? `stopped, ${s.stopped}${always}` : idle}`)
   const pings = breakEvenPings(s)
   if (pings != null) lines.push(`break-even  up to ${pings} pings at the read rate cost one cold write, about ${fmtDuration(pings * s.every)} of idle at one ping per ${fmtDuration(s.every)}`)
@@ -416,8 +416,8 @@ export const register: Register = on => {
     if (usage.context.tokens) s.ctx = usage.context.tokens
     await $.command.register({
       name: 'keepwarm',
-      description: 'Keep the prompt cache warm: bare for 6h, a window such as 90m, always, off, or status (cache-tax)',
-      argumentHint: '[6h | always | off | status]',
+      description: 'Keep the prompt cache warm: bare for 1h, a window such as 90m, always, off, or status (cache-tax)',
+      argumentHint: '[1h | always | off | status]',
       immediate: true,
     })
     await $.command.register({
