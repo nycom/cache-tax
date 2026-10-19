@@ -26,7 +26,7 @@ claude plugin install cache-tax@claude-code-mods
 
 Restart Claude Code or run `/reload-plugins` in an open session. No early-access flag is needed. If you set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` previously, remove it; current Claude Code ignores it.
 
-In a warm session, run `/keepwarm` to arm six hours. Use `/keepwarm 90m` for a shorter window, or `/keepwarm off` to stop.
+In a warm session, run `/keepwarm` to arm one hour. Use `/keepwarm 90m` for a shorter window, or `/keepwarm off` to stop.
 
 **Check the main cache lifetime.** Included subscription usage defaults to one hour. API-key, usage-credit and cloud-provider sessions default to five minutes, so set [`promptCacheTtl`](https://code.claude.com/docs/en/prompt-caching#choose-the-ttl-yourself) to `"1h"` for those billing paths. A 50-minute timer cannot protect a five-minute main cache. See [Limits](#limits) for the fork evidence.
 
@@ -60,9 +60,9 @@ New to caching? [Anthropic explains how Claude Code uses it](https://code.claude
 
 ## Commands
 
-    /keepwarm               keep warm for six hours
+    /keepwarm               keep warm for one hour
     /keepwarm 90m           keep warm for a window of your own (also 2h30m, 6h)
-    /keepwarm always        arm a six-hour window at every session start, remembered across sessions
+    /keepwarm always        arm a one-hour window at every session start, remembered across sessions
     /keepwarm 6h every 2m   pinging every two minutes; a testing knob, floor 1m, forgotten after this window
     /keepwarm status        the warming window, next ping and last receipt
     /keepwarm off           stop, forget the window, and turn always off
