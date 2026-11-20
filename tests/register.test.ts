@@ -543,12 +543,12 @@ describe('guard', () => {
     await $.session.start(session)
     await $.turn.complete(turn())
     await clock.advance(3 * HOUR)
-    for (const kind of ['task-notification', 'scheduled-trigger', 'peer-send-message', 'coordinator', 'unclassified'] as const) {
+    for (const kind of ['task-notification', 'scheduled-trigger', 'peer-send-message', 'coordinator', 'unclassified', 'sdk'] as const) {
       const r = await $.prompt.submit({ text: `from ${kind}`, wait: false, origin: { kind } })
       expect(r.drop).toBe(undefined)
       expect(w.logs.at(-1)).toMatch(new RegExp(`Sending anyway, since this ${kind} prompt cannot be sent again`))
     }
-    expect(w.entered).toEqual(['from task-notification', 'from scheduled-trigger', 'from peer-send-message', 'from coordinator', 'from unclassified'])
+    expect(w.entered).toEqual(['from task-notification', 'from scheduled-trigger', 'from peer-send-message', 'from coordinator', 'from unclassified', 'from sdk'])
     expect(w.fills).toEqual([])
   })
 
