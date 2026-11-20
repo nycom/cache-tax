@@ -31,6 +31,10 @@ const PRICES: Array<[string, number, number, number]> = [
   ['haiku', 0.1, 2, 5],
 ]
 
+// The guard holds only a prompt the owner typed (here, or from the phone over Remote Control): only that one gets sent again.
+// Every other origin (notifications, schedules, peers, new kinds the engine adds later) goes through with the price logged.
+const OWN_PROMPTS = new Set(['composer', 'bridge'])
+
 type PingRecord = { at: number; read: number; write: number; usd: number | null; warm: boolean }
 type Miss = { at: number; tokens: number; usd: number | null }
 type GuardMode = 'refuse' | 'warn'
@@ -508,8 +512,10 @@ export const register: Register = on => {
     if (typeof e.text !== 'string' || e.text.trimStart().startsWith('/')) return next(e)
     const now = await $.clock.now()
     if (!isCold(s, now) || s.ctx < BIG_TOKENS) return next(e)
-    if (s.guard === 'warn') {
-      $.ui.log(`Cache cold ${coldCost(s, now, 'This send')} Sending anyway; keepwarm will hold the cache for ${fmtDuration(AUTO_WARM_MS)} once it lands.`)
+    const own = OWN_PROMPTS.has(e.origin.kind)
+    if (s.guard === 'warn' || !own) {
+      const why = own ? '' : `, since this ${e.origin.kind} prompt cannot be sent again`
+      $.ui.log(`Cache cold ${coldCost(s, now, 'This send')} Sending anyway${why}; keepwarm will hold the cache for ${fmtDuration(AUTO_WARM_MS)} once it lands.`)
       s.coldWritePending = true
       return next(e)
     }

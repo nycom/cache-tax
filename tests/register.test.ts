@@ -537,6 +537,32 @@ describe('guard', () => {
     expect(w.entered).toEqual(['warm one', '/clear', 'small one'])
   })
 
+  test('refuse holds only the owner\'s prompts; unattended ones go through with the price logged', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    for (const kind of ['task-notification', 'scheduled-trigger', 'peer-send-message', 'coordinator', 'unclassified'] as const) {
+      const r = await $.prompt.submit({ text: `from ${kind}`, wait: false, origin: { kind } })
+      expect(r.drop).toBe(undefined)
+      expect(w.logs.at(-1)).toMatch(new RegExp(`Sending anyway, since this ${kind} prompt cannot be sent again`))
+    }
+    expect(w.entered).toEqual(['from task-notification', 'from scheduled-trigger', 'from peer-send-message', 'from coordinator', 'from unclassified'])
+    expect(w.fills).toEqual([])
+  })
+
+  test('a prompt from the phone (Remote Control) is held like one typed here', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'bridge' } })).drop).toMatch(/^Not sent: /)
+    expect((await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'bridge' } })).drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+  })
+
   test('warn mode shows the price and sends', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [])
